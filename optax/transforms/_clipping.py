@@ -94,7 +94,23 @@ def clip_by_global_norm(
 
   def update_fn(updates, state, params=None):
     del params
-    g_norm = optax.tree.norm(updates)
+
+    def _at_least_fp32(leaf):
+      # Wider of the leaf dtype and float32 (complex64 for complex leaves).
+      dtype = getattr(leaf, "dtype", None)
+      if dtype is None or not jnp.issubdtype(dtype, jnp.inexact):
+        return leaf
+      floor = (
+          jnp.complex64
+          if jnp.issubdtype(dtype, jnp.complexfloating)
+          else jnp.float32
+      )
+      wide = jnp.promote_types(dtype, floor)
+      return leaf if wide == dtype else leaf.astype(wide)
+
+    # Cast before squaring. float16 squares overflow for moderate finite
+    # values (for example 300), and the clip then divides by inf.
+    g_norm = optax.tree.norm(jax.tree.map(_at_least_fp32, updates))
     # TODO(b/163995078): revert back to the following (faster) implementation
     # once analyzed how it affects backprop through update (e.g. meta-gradients)
     # g_norm = jnp.maximum(max_norm, g_norm)
@@ -103,7 +119,9 @@ def clip_by_global_norm(
     utils.check_rank(trigger, 0)  # A scalar.
 
     def clip_fn(t):
-      return jax.lax.select(trigger, t, (t / g_norm.astype(t.dtype)) * max_norm)
+      # Cast the scale back so each leaf keeps its own dtype.
+      scale = (max_norm / g_norm).astype(t.dtype)
+      return jax.lax.select(trigger, t, t * scale)
 
     updates = jax.tree.map(clip_fn, updates)
     return updates, state

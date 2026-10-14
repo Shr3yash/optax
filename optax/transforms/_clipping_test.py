@@ -75,6 +75,45 @@ class ClippingTest(absltest.TestCase):
       updates_step, _ = clipper.update(self.per_step_updates, None)
       test_utils.assert_trees_all_close(updates, updates_step)
 
+  def test_clip_by_global_norm_float16(self):
+    """Finite float16 updates are rescaled instead of overflowing to zero."""
+    updates = jnp.array([300.0, 400.0], dtype=jnp.float16)
+    clipper = _clipping.clip_by_global_norm(1.0)
+    expected = jnp.array([0.6, 0.8])
+
+    def clip(u):
+      clipped, _ = clipper.update(u, None)
+      return clipped
+
+    for compile_fn in (lambda f: f, jax.jit):
+      with self.subTest(compiled=compile_fn is jax.jit):
+        got = compile_fn(clip)(updates)
+        np.testing.assert_allclose(got, expected, rtol=1e-3, atol=1e-3)
+        self.assertEqual(got.dtype, jnp.float16)
+
+  def test_clip_by_global_norm_mixed_dtype(self):
+    """One global norm is shared by float16 and float32 leaves."""
+    updates = (
+        jnp.array([300.0], dtype=jnp.float16),
+        jnp.array([400.0], dtype=jnp.float32),
+    )
+    clipper = _clipping.clip_by_global_norm(1.0)
+    expected = (
+        jnp.array([0.6], dtype=jnp.float16),
+        jnp.array([0.8], dtype=jnp.float32),
+    )
+
+    def clip(u):
+      clipped, _ = clipper.update(u, None)
+      return clipped
+
+    for compile_fn in (lambda f: f, jax.jit):
+      with self.subTest(compiled=compile_fn is jax.jit):
+        got = compile_fn(clip)(updates)
+        test_utils.assert_trees_all_close(got, expected, rtol=1e-3, atol=1e-3)
+        for actual, want in zip(got, expected):
+          self.assertEqual(actual.dtype, want.dtype)
+
   def test_adaptive_grad_clip_with_axis(self):
     """Test adaptive_grad_clip with custom axis parameter."""
 
